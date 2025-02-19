@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-A Markdown to PDF converter for macOS that handles Mermaid diagrams,
-code blocks, and math using MathJax.
-
-This converter processes Markdown to HTML using Pandoc with the --mathjax option,
-renders Mermaid diagrams as SVG (or PNG if --png is specified),
-and then uses headless Google Chrome to convert the HTML to PDF.
+A Markdown to PDF converter for macOS that handles:
+- Mermaid diagrams (rendered as SVG or PNG)
+- Code blocks
+- Math (via MathJax)
+- Automatic attempt to normalize inline numbered lists (so Pandoc treats them as lists)
 
 Usage:
     ./md2pdf.py input.md [output.pdf] [--png]
 
-Ensure you have Google Chrome installed.
+Requires:
+- Google Chrome (for headless PDF generation)
+- Pandoc
+- Mermaid CLI (mmdc)
 """
 
 import os
@@ -48,12 +50,34 @@ def generate_output_filename(input_file: str) -> str:
     return str(pdf_path)
 
 
+def normalize_lists(content: str) -> str:
+    """
+    Attempt to convert inline numbered lists (like "sections: 1. Key Concepts, 2. Agent...")
+    into real lists recognized by Pandoc. We do two main things:
+    
+    1. Insert a blank line after a colon if it's followed by a numbered item
+       (e.g., ": 1. Key" becomes ":\n\n1. Key").
+    2. Force each numbered item onto its own line if it appears inline
+       (e.g., "2. Agent Framework:" -> "\n2. Agent Framework:").
+
+    This is a heuristic approach and may need fine-tuning for your content.
+    """
+    # 1) If there's a colon followed by a numbered item, insert a blank line.
+    content = re.sub(r':\s*(\d+\.\s+)', r':\n\n\1', content)
+
+    # 2) Force every numbered item to start on a new line if it doesn't already.
+    #    (Any occurrence of e.g. " 2. Something" becomes "\n2. Something".)
+    content = re.sub(r'([^\n])(\d+\.\s+)', r'\1\n\2', content)
+
+    return content
+
+
 def extract_mermaid_diagrams(markdown_content: str, output_format: str = 'html', image_ext: str = "svg") -> Tuple[str, List[Tuple[str, str]]]:
     """
     Extract Mermaid diagrams from the Markdown content.
-    Replace them with placeholders.
+    Replace them with placeholders:
       - For HTML output, insert an HTML <div> with an <img> tag referencing an image
-        file with the given extension.
+        file with the given extension (SVG by default).
     Returns the new content and a list of tuples (diagram_id, diagram_content).
     """
     pattern = r"```mermaid\n(.*?)\n```"
@@ -64,7 +88,7 @@ def extract_mermaid_diagrams(markdown_content: str, output_format: str = 'html',
         diagram_id = f"diagram_{len(diagrams)}"
         diagrams.append((diagram_id, diagram_content))
         if output_format == 'html':
-            # Use the specified image extension (svg by default, or png if requested)
+            # Insert an <img> referencing diagram_id.<ext>, e.g. diagram_0.svg
             return (
                 f'\n<div style="text-align:center;">\n'
                 f'  <img src="{diagram_id}.{image_ext}" alt="{diagram_id}" style="max-width:80%;">\n'
@@ -165,29 +189,36 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
     with open(markdown_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    # Extract doc info but keep the main text in clean_content
     doc_info = extract_document_info(content)
     content = doc_info['clean_content']
 
-    # Process Mermaid diagrams (for HTML) and leave code blocks unchanged.
+    # 1) Attempt to fix inline lists so Pandoc recognizes them
+    content = normalize_lists(content)
+
+    # 2) Extract Mermaid diagrams and replace them with placeholders
     content, diagrams = extract_mermaid_diagrams(content, output_format='html', image_ext=image_ext)
+
+    # 3) Code blocks: leave them alone for Pandoc
     content = process_code_blocks(content, output_format='html')
 
     with tempfile.TemporaryDirectory() as temp_dir:
         logger.info(f"Using temporary directory: {temp_dir}")
+
+        # Write out the processed Markdown
         temp_md = os.path.join(temp_dir, "processed.md")
         with open(temp_md, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        # Render Mermaid diagrams as images and save them in the temporary directory.
+        # Render each Mermaid diagram to an image file (SVG or PNG)
         for diagram_id, diagram_content in diagrams:
             output_img = os.path.join(temp_dir, f"{diagram_id}.{image_ext}")
             try:
                 render_mermaid_diagram(diagram_content, output_img)
             except Exception as e:
                 logger.error(f"Failed to render diagram {diagram_id}: {str(e)}")
-            # The HTML output will reference these images via relative paths.
 
-        # Convert Markdown to HTML with Pandoc using MathJax.
+        # Convert the processed Markdown to HTML (with MathJax) via Pandoc
         temp_html = os.path.join(temp_dir, "output.html")
         pandoc_args = [
             'pandoc',
@@ -210,7 +241,7 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
             logger.error(f"HTML conversion failed: {e.stdout}\n{e.stderr}")
             raise RuntimeError(f"HTML conversion failed with exit code {e.returncode}") from e
 
-        # Use headless Chrome to print the HTML to PDF.
+        # Finally, run headless Chrome to convert HTML -> PDF
         chrome_path = get_chrome_path()
         chrome_args = [
             chrome_path,
