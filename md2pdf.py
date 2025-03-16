@@ -5,9 +5,11 @@ A Markdown to PDF converter for macOS that handles:
 - Code blocks
 - Math (via MathJax)
 - Automatic attempt to normalize inline numbered lists (so Pandoc treats them as lists)
+- Optional larger font size for Arabic text with --arabic <fontsize>
+- Visible table grid lines in the PDF output
 
 Usage:
-    ./md2pdf.py input.md [output.pdf] [--png]
+    ./md2pdf.py input.md [output.pdf] [--png] [--arabic <fontsize>]
 
 Requires:
 - Google Chrome (for headless PDF generation)
@@ -36,6 +38,26 @@ logger = logging.getLogger(__name__)
 # Default path to Google Chrome (adjust if needed)
 DEFAULT_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
+# CSS to add table grid lines and basic styling
+TABLE_CSS = """
+<style>
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 20px 0;
+    }
+    th, td {
+        border: 1px solid black;
+        padding: 8px;
+        text-align: left;
+        vertical-align: top;
+    }
+    th {
+        background-color: #f2f2f2;
+    }
+</style>
+"""
+
 
 def generate_output_filename(input_file: str) -> str:
     """Generate an output PDF filename based on the input Markdown file."""
@@ -53,32 +75,49 @@ def generate_output_filename(input_file: str) -> str:
 def normalize_lists(content: str) -> str:
     """
     Attempt to convert inline numbered lists (like "sections: 1. Key Concepts, 2. Agent...")
-    into real lists recognized by Pandoc. We do two main things:
-    
-    1. Insert a blank line after a colon if it's followed by a numbered item
-       (e.g., ": 1. Key" becomes ":\n\n1. Key").
-    2. Force each numbered item onto its own line if it appears inline
-       (e.g., "2. Agent Framework:" -> "\n2. Agent Framework:").
-
-    This is a heuristic approach and may need fine-tuning for your content.
+    into real lists recognized by Pandoc.
     """
-    # 1) If there's a colon followed by a numbered item, insert a blank line.
     content = re.sub(r':\s*(\d+\.\s+)', r':\n\n\1', content)
-
-    # 2) Force every numbered item to start on a new line if it doesn't already.
-    #    (Any occurrence of e.g. " 2. Something" becomes "\n2. Something".)
     content = re.sub(r'([^\n])(\d+\.\s+)', r'\1\n\2', content)
-
     return content
+
+
+def process_arabic_text(content: str, arabic_font_size: int = None) -> str:
+    """
+    Detect Arabic text and wrap it in a <span> with a custom font size if specified.
+    Arabic Unicode range: \u0600-\u06FF
+    """
+    if not arabic_font_size:
+        return content
+
+    logger.info(f"Processing Arabic text with font size {arabic_font_size}px")
+
+    arabic_pattern = r'[\u0600-\u06FF]+(?:\s*[\u0600-\u06FF]+)*'
+
+    def wrap_arabic(match):
+        arabic_text = match.group(0)
+        return f'<span style="font-size:{arabic_font_size}px; font-family:Arial, sans-serif; direction:rtl;">{arabic_text}</span>'
+
+    lines = content.split('\n')
+    in_code_block = False
+    processed_lines = []
+
+    for line in lines:
+        if line.strip().startswith('```'):
+            in_code_block = not in_code_block
+            processed_lines.append(line)
+            continue
+        if not in_code_block:
+            line = re.sub(arabic_pattern, wrap_arabic, line)
+        processed_lines.append(line)
+
+    return '\n'.join(processed_lines)
 
 
 def extract_mermaid_diagrams(markdown_content: str, output_format: str = 'html', image_ext: str = "svg") -> Tuple[str, List[Tuple[str, str]]]:
     """
     Extract Mermaid diagrams from the Markdown content.
-    Replace them with placeholders:
-      - For HTML output, insert an HTML <div> with an <img> tag referencing an image
-        file with the given extension (SVG by default).
-    Returns the new content and a list of tuples (diagram_id, diagram_content).
+    Replace them with placeholders for HTML output.
     """
     pattern = r"```mermaid\n(.*?)\n```"
     diagrams = []
@@ -88,7 +127,6 @@ def extract_mermaid_diagrams(markdown_content: str, output_format: str = 'html',
         diagram_id = f"diagram_{len(diagrams)}"
         diagrams.append((diagram_id, diagram_content))
         if output_format == 'html':
-            # Insert an <img> referencing diagram_id.<ext>, e.g. diagram_0.svg
             return (
                 f'\n<div style="text-align:center;">\n'
                 f'  <img src="{diagram_id}.{image_ext}" alt="{diagram_id}" style="max-width:80%;">\n'
@@ -120,7 +158,6 @@ def extract_document_info(content: str) -> Dict[str, str]:
     abstract_match = re.search(abstract_pattern, content, re.MULTILINE)
     abstract = abstract_match.group(1).strip() if abstract_match else ""
 
-    # Remove metadata lines from content.
     clean_content = content
     if author:
         clean_content = re.sub(author_pattern, '', clean_content, count=1, flags=re.MULTILINE)
@@ -139,7 +176,6 @@ def extract_document_info(content: str) -> Dict[str, str]:
 def render_mermaid_diagram(content: str, output_file: str) -> None:
     """
     Render a Mermaid diagram to an image file using the mmdc command.
-    The output_file extension determines the image format (SVG or PNG).
     """
     logger.info(f"Rendering diagram to {output_file}")
     with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as temp:
@@ -178,12 +214,10 @@ def get_chrome_path() -> str:
     return os.environ.get("CHROME_PATH", DEFAULT_CHROME_PATH)
 
 
-def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str = "svg") -> None:
+def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str = "svg", arabic_font_size: int = None) -> None:
     """
     Convert Markdown to PDF using MathJax.
-    This conversion path uses Pandoc to produce HTML (with --mathjax) and then
-    uses headless Google Chrome to convert the HTML to PDF.
-    The image_ext parameter determines the format for Mermaid diagrams (svg by default).
+    Optionally apply a larger font size to Arabic text and add table grid lines.
     """
     logger.info(f"Beginning MathJax conversion of '{markdown_file}' to '{output_pdf}'")
     with open(markdown_file, 'r', encoding='utf-8') as f:
@@ -196,10 +230,13 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
     # 1) Attempt to fix inline lists so Pandoc recognizes them
     content = normalize_lists(content)
 
-    # 2) Extract Mermaid diagrams and replace them with placeholders
+    # 2) Process Arabic text if a font size is specified
+    content = process_arabic_text(content, arabic_font_size)
+
+    # 3) Extract Mermaid diagrams and replace them with placeholders
     content, diagrams = extract_mermaid_diagrams(content, output_format='html', image_ext=image_ext)
 
-    # 3) Code blocks: leave them alone for Pandoc
+    # 4) Code blocks: leave them alone for Pandoc
     content = process_code_blocks(content, output_format='html')
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -219,13 +256,13 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
                 logger.error(f"Failed to render diagram {diagram_id}: {str(e)}")
 
         # Convert the processed Markdown to HTML (with MathJax) via Pandoc
-        temp_html = os.path.join(temp_dir, "output.html")
+        temp_html_raw = os.path.join(temp_dir, "output_raw.html")
         pandoc_args = [
             'pandoc',
             temp_md,
             '--to', 'html5',
             '--mathjax',
-            '-o', temp_html,
+            '-o', temp_html_raw,
             '--standalone'
         ]
         logger.info("Running Pandoc conversion to HTML (MathJax path)")
@@ -240,6 +277,15 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
         except subprocess.CalledProcessError as e:
             logger.error(f"HTML conversion failed: {e.stdout}\n{e.stderr}")
             raise RuntimeError(f"HTML conversion failed with exit code {e.returncode}") from e
+
+        # Read the raw HTML and inject the table CSS
+        with open(temp_html_raw, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        temp_html = os.path.join(temp_dir, "output.html")
+        with open(temp_html, 'w', encoding='utf-8') as f:
+            # Inject the CSS just before the </head> tag
+            html_content = html_content.replace('</head>', TABLE_CSS + '</head>')
+            f.write(html_content)
 
         # Finally, run headless Chrome to convert HTML -> PDF
         chrome_path = get_chrome_path()
@@ -269,19 +315,27 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert Markdown to PDF using MathJax. "
                     "By default, Mermaid diagrams are rendered as SVG. "
-                    "Use --png to render them as PNG."
+                    "Use --png to render them as PNG. "
+                    "Use --arabic <fontsize> to set a larger font size for Arabic text. "
+                    "Tables will have visible grid lines in the PDF."
     )
     parser.add_argument("input_file", help="Input Markdown file")
     parser.add_argument("output_file", nargs="?", help="Output PDF file (optional)")
     parser.add_argument("--png", action="store_true", help="Render Mermaid diagrams as PNG instead of SVG")
+    parser.add_argument("--arabic", type=int, help="Set font size (in pixels) for Arabic text")
     args = parser.parse_args()
 
     input_file = args.input_file
     output_file = args.output_file if args.output_file else generate_output_filename(input_file)
     image_ext = "png" if args.png else "svg"
+    arabic_font_size = args.arabic
+
+    if arabic_font_size and arabic_font_size <= 0:
+        logger.error("Arabic font size must be a positive integer")
+        sys.exit(1)
 
     try:
-        convert_to_pdf_mathjax(input_file, output_file, image_ext=image_ext)
+        convert_to_pdf_mathjax(input_file, output_file, image_ext=image_ext, arabic_font_size=arabic_font_size)
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         sys.exit(1)
