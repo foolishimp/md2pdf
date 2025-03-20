@@ -74,12 +74,19 @@ def generate_output_filename(input_file: str) -> str:
 
 def normalize_lists(content: str) -> str:
     """
-    Attempt to convert inline numbered lists (like "sections: 1. Key Concepts, 2. Agent...")
-    into real lists recognized by Pandoc.
+    Convert inline numbered lists after a colon into proper lists, skipping headings.
     """
-    content = re.sub(r':\s*(\d+\.\s+)', r':\n\n\1', content)
-    content = re.sub(r'([^\n])(\d+\.\s+)', r'\1\n\2', content)
-    return content
+    lines = content.split('\n')
+    processed_lines = []
+    for line in lines:
+        if line.strip().startswith('#'):
+            # Leave heading lines unchanged
+            processed_lines.append(line)
+        else:
+            # Apply list normalization only to non-heading lines
+            line = re.sub(r':\s*(\d+\.\s+)', r':\n\n\1', line)
+            processed_lines.append(line)
+    return '\n'.join(processed_lines)
 
 
 def process_arabic_text(content: str, arabic_font_size: int = None) -> str:
