@@ -7,9 +7,10 @@ A Markdown to PDF converter for macOS that handles:
 - Automatic attempt to normalize inline numbered lists (so Pandoc treats them as lists)
 - Optional larger font size for Arabic text with --arabic <fontsize>
 - Visible table grid lines in the PDF output
+- Optional diagram size control with --diagram-width and --diagram-height
 
 Usage:
-    ./md2pdf.py input.md [output.pdf] [--png] [--arabic <fontsize>]
+    ./md2pdf.py input.md [output.pdf] [--png] [--arabic <fontsize>] [--diagram-width <pixels>] [--diagram-height <pixels>]
 
 Requires:
 - Google Chrome (for headless PDF generation)
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 # Default path to Google Chrome (adjust if needed)
 DEFAULT_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+# Default diagram dimensions (reduced from original 800x600)
+DEFAULT_DIAGRAM_WIDTH = 400
+DEFAULT_DIAGRAM_HEIGHT = 300
 
 # CSS to add table grid lines and basic styling
 TABLE_CSS = """
@@ -180,11 +185,11 @@ def extract_document_info(content: str) -> Dict[str, str]:
     }
 
 
-def render_mermaid_diagram(content: str, output_file: str) -> None:
+def render_mermaid_diagram(content: str, output_file: str, width: int = DEFAULT_DIAGRAM_WIDTH, height: int = DEFAULT_DIAGRAM_HEIGHT) -> None:
     """
     Render a Mermaid diagram to an image file using the mmdc command.
     """
-    logger.info(f"Rendering diagram to {output_file}")
+    logger.info(f"Rendering diagram to {output_file} (size: {width}x{height})")
     with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as temp:
         temp.write(content)
         temp_path = temp.name
@@ -194,8 +199,8 @@ def render_mermaid_diagram(content: str, output_file: str) -> None:
             '-i', temp_path,
             '-o', output_file,
             '-b', 'transparent',
-            '-w', '800',
-            '-H', '600'
+            '-w', str(width),
+            '-H', str(height)
         ], check=True, capture_output=True, text=True)
         logger.info(f"Successfully rendered diagram to {output_file}")
     except subprocess.CalledProcessError as e:
@@ -221,12 +226,16 @@ def get_chrome_path() -> str:
     return os.environ.get("CHROME_PATH", DEFAULT_CHROME_PATH)
 
 
-def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str = "svg", arabic_font_size: int = None) -> None:
+def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str = "svg", 
+                          arabic_font_size: int = None, diagram_width: int = DEFAULT_DIAGRAM_WIDTH, 
+                          diagram_height: int = DEFAULT_DIAGRAM_HEIGHT) -> None:
     """
     Convert Markdown to PDF using MathJax.
     Optionally apply a larger font size to Arabic text and add table grid lines.
     """
     logger.info(f"Beginning MathJax conversion of '{markdown_file}' to '{output_pdf}'")
+    logger.info(f"Using diagram size: {diagram_width}x{diagram_height}")
+    
     with open(markdown_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -258,7 +267,7 @@ def convert_to_pdf_mathjax(markdown_file: str, output_pdf: str, image_ext: str =
         for diagram_id, diagram_content in diagrams:
             output_img = os.path.join(temp_dir, f"{diagram_id}.{image_ext}")
             try:
-                render_mermaid_diagram(diagram_content, output_img)
+                render_mermaid_diagram(diagram_content, output_img, diagram_width, diagram_height)
             except Exception as e:
                 logger.error(f"Failed to render diagram {diagram_id}: {str(e)}")
 
@@ -330,19 +339,36 @@ def main():
     parser.add_argument("output_file", nargs="?", help="Output PDF file (optional)")
     parser.add_argument("--png", action="store_true", help="Render Mermaid diagrams as PNG instead of SVG")
     parser.add_argument("--arabic", type=int, help="Set font size (in pixels) for Arabic text")
+    parser.add_argument("--diagram-width", type=int, default=DEFAULT_DIAGRAM_WIDTH, 
+                       help=f"Width of rendered Mermaid diagrams in pixels (default: {DEFAULT_DIAGRAM_WIDTH})")
+    parser.add_argument("--diagram-height", type=int, default=DEFAULT_DIAGRAM_HEIGHT, 
+                       help=f"Height of rendered Mermaid diagrams in pixels (default: {DEFAULT_DIAGRAM_HEIGHT})")
     args = parser.parse_args()
 
     input_file = args.input_file
     output_file = args.output_file if args.output_file else generate_output_filename(input_file)
     image_ext = "png" if args.png else "svg"
     arabic_font_size = args.arabic
+    diagram_width = args.diagram_width
+    diagram_height = args.diagram_height
 
     if arabic_font_size and arabic_font_size <= 0:
         logger.error("Arabic font size must be a positive integer")
         sys.exit(1)
+        
+    if diagram_width <= 0 or diagram_height <= 0:
+        logger.error("Diagram width and height must be positive integers")
+        sys.exit(1)
 
     try:
-        convert_to_pdf_mathjax(input_file, output_file, image_ext=image_ext, arabic_font_size=arabic_font_size)
+        convert_to_pdf_mathjax(
+            input_file, 
+            output_file, 
+            image_ext=image_ext, 
+            arabic_font_size=arabic_font_size,
+            diagram_width=diagram_width,
+            diagram_height=diagram_height
+        )
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         sys.exit(1)
